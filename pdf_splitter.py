@@ -124,9 +124,14 @@ class App(tk.Tk):
         self.progress.grid(row=3, column=0, padx=12, pady=(0, 4), sticky="ew")
 
         # ── 로그 ──
-        self.log_box = tk.Text(self, height=12, width=56, state="disabled",
+        frm_log = ttk.Frame(self)
+        frm_log.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="ew")
+        self.log_box = tk.Text(frm_log, height=12, width=54, state="disabled",
                                bg="#1e1e1e", fg="#d4d4d4", font=("Courier", 10))
-        self.log_box.grid(row=4, column=0, padx=12, pady=(0, 12))
+        scrollbar = ttk.Scrollbar(frm_log, command=self.log_box.yview)
+        self.log_box.configure(yscrollcommand=scrollbar.set)
+        self.log_box.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
     # ── 파일/폴더 선택 ──
 
@@ -174,18 +179,21 @@ class App(tk.Tk):
             else:
                 ok.append((p, mb))
 
+        over.sort(key=lambda x: x[1])
+        ok.sort(key=lambda x: x[1])
+
         self._log(f"── 스캔 결과 (기준: {max_mb} MB) ──\n")
+        if ok:
+            self._log(f"✔ 기준 이하 (건너뜀): {len(ok)}개\n", "ok")
+            for p, mb in ok:
+                self._log(f"  • {Path(p).name}  ({mb:.1f} MB)\n", "ok")
+
         if over:
-            self._log(f"⚠️  분할 필요: {len(over)}개\n")
+            self._log(f"\n⚠️  분할 필요: {len(over)}개\n")
             for p, mb in over:
                 self._log(f"  • {Path(p).name}  ({mb:.1f} MB)\n", "warn")
         else:
-            self._log("✅ 모든 파일이 기준 이하입니다.\n")
-
-        if ok:
-            self._log(f"\n✔ 기준 이하 (건너뜀): {len(ok)}개\n", "ok")
-            for p, mb in ok:
-                self._log(f"  • {Path(p).name}  ({mb:.1f} MB)\n", "ok")
+            self._log("\n✅ 모든 파일이 기준 이하입니다.\n")
 
         self.btn_run.config(state="normal" if over else "disabled")
 

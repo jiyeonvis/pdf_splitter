@@ -62,8 +62,8 @@ notebookLM는 용량이 200MB를 넘는 pdf를 받아주지 않습니다.. noteb
 ## 개발 환경에서 실행하기
 
 ```bash
-pip install pymupdf
-python3 pdf_splitter.py
+pip3.13 install pymupdf
+python3.13 pdf_splitter.py
 ```
 
 ## 실행 파일 직접 빌드하기
