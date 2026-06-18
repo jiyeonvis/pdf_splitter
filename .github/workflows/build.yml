@@ -10,10 +10,10 @@ jobs:
         include:
           - os: windows-latest
             artifact_name: pdf_splitter_windows
-            pyinstaller_args: --onefile --windowed
+            pyinstaller_args: --onefile --windowed --icon=icon.ico
           - os: macos-latest
             artifact_name: pdf_splitter_mac
-            pyinstaller_args: --onedir --windowed
+            pyinstaller_args: --onedir --windowed --icon=icon.icns
 
     runs-on: ${{ matrix.os }}
 
