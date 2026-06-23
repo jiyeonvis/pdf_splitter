@@ -143,6 +143,9 @@ class BaseTab(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
         self.selected_paths = []
+        self.selected_folder = None   # 폴더 선택 시 루트 경로 저장
+        self.var_recursive = tk.BooleanVar(value=False)
+        self.var_keep_structure = tk.BooleanVar(value=False)
         self._build()
 
     def _build(self):
@@ -179,12 +182,20 @@ class BaseTab(ttk.Frame):
     def _pick_folder(self, filetypes=None):
         folder = filedialog.askdirectory()
         if not folder:
-            return []
+            return None, []
+        recursive = self.var_recursive.get()
         if filetypes:
-            exts = [e.lstrip("*") for _, e in filetypes]
-            return [str(p) for p in Path(folder).iterdir()
-                    if p.suffix.lower() in exts]
-        return [str(p) for p in Path(folder).glob("*.pdf")]
+            exts = set()
+            for _, pattern in filetypes:
+                for p in pattern.split():
+                    exts.add(p.lstrip("*").lower())
+            glob = "**/*" if recursive else "*"
+            paths = [str(p) for p in Path(folder).glob(glob)
+                     if p.is_file() and p.suffix.lower() in exts]
+        else:
+            pattern = "**/*.pdf" if recursive else "*.pdf"
+            paths = [str(p) for p in Path(folder).glob(pattern) if p.is_file()]
+        return folder, paths
 
     def _pick_files(self, filetypes):
         files = filedialog.askopenfilenames(filetypes=filetypes)
@@ -194,22 +205,44 @@ class BaseTab(ttk.Frame):
         frm = ttk.LabelFrame(parent, text="입력")
         frm.grid(row=row, column=0, sticky="ew", padx=12, pady=6)
 
+        # 파일 목록 리스트박스
+        frm_list = ttk.Frame(frm)
+        frm_list.grid(row=2, column=0, columnspan=3, padx=6, pady=(0, 6), sticky="ew")
+        listbox = tk.Listbox(frm_list, height=5, width=54,
+                             bg="#2a2a2a", fg="#d4d4d4", font=("Courier", 10),
+                             selectmode="extended", activestyle="none")
+        sb_list = ttk.Scrollbar(frm_list, command=listbox.yview)
+        listbox.configure(yscrollcommand=sb_list.set)
+        listbox.pack(side="left", fill="both", expand=True)
+        sb_list.pack(side="right", fill="y")
+
+        def refresh_list(paths):
+            listbox.delete(0, "end")
+            for p in sorted(paths):
+                listbox.insert("end", Path(p).name)
+
         def on_folder():
-            paths = self._pick_folder(filetypes)
+            folder, paths = self._pick_folder(filetypes)
             if paths:
                 self.selected_paths = paths
+                self.selected_folder = folder
                 label_var.set(f"폴더 선택됨  ({len(paths)}개 파일)")
+                refresh_list(paths)
 
         def on_files():
             paths = self._pick_files(filetypes)
             if paths:
                 self.selected_paths = paths
+                self.selected_folder = None
                 label_var.set(f"파일 {len(paths)}개 선택됨")
+                refresh_list(paths)
 
         ttk.Button(frm, text="📂 폴더 선택", command=on_folder).grid(row=0, column=0, padx=6, pady=6)
         ttk.Button(frm, text="📄 파일 선택", command=on_files).grid(row=0, column=1, padx=6, pady=6)
+        ttk.Checkbutton(frm, text="하위 폴더 포함", variable=self.var_recursive).grid(
+            row=0, column=2, padx=6, pady=6)
         ttk.Label(frm, textvariable=label_var, foreground="gray").grid(
-            row=1, column=0, columnspan=2, padx=6, pady=(0, 6), sticky="w")
+            row=1, column=0, columnspan=3, padx=6, pady=(0, 2), sticky="w")
         return frm
 
     def _make_output_row(self, parent, frm_cfg, row, var_out):
@@ -218,11 +251,27 @@ class BaseTab(ttk.Frame):
         ttk.Button(frm_cfg, text="찾아보기",
                    command=lambda: var_out.set(filedialog.askdirectory() or var_out.get())
                    ).grid(row=row, column=2, padx=6, pady=4)
+        ttk.Checkbutton(frm_cfg, text="하위 폴더 구조 유지", variable=self.var_keep_structure).grid(
+            row=row + 1, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 2))
 
     def _make_progress(self, parent, row):
         pb = ttk.Progressbar(parent, length=400, mode="determinate")
         pb.grid(row=row, column=0, padx=12, pady=(0, 4), sticky="ew")
         return pb
+
+    def _resolve_output_dir(self, src, var_out):
+        """출력 폴더 결정. 하위 폴더 구조 유지 옵션 반영."""
+        out_val = var_out.get()
+        if out_val == "(원본과 동일)":
+            return Path(src).parent
+        out_base = Path(out_val)
+        if self.var_keep_structure.get() and self.selected_folder:
+            try:
+                rel = Path(src).parent.relative_to(self.selected_folder)
+                return out_base / rel
+            except ValueError:
+                pass
+        return out_base
 
 
 # ── 탭 1: PDF 용량 분할 ────────────────────────────────────────
@@ -242,7 +291,7 @@ class PdfSizeTab(BaseTab):
         self._make_output_row(self, frm_cfg, 1, self.var_out)
         self.var_delete = tk.BooleanVar(value=False)
         ttk.Checkbutton(frm_cfg, text="분할 후 원본 삭제", variable=self.var_delete).grid(
-            row=2, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
+            row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
 
         frm_btn = ttk.Frame(self)
         frm_btn.grid(row=2, column=0, **pad)
@@ -300,7 +349,7 @@ class PdfSizeTab(BaseTab):
         def worker():
             done, failed = 0, 0
             for i, src in enumerate(targets):
-                out_dir = Path(out_val) if out_val != "(원본과 동일)" else Path(src).parent
+                out_dir = self._resolve_output_dir(src, self.var_out)
                 out_dir.mkdir(parents=True, exist_ok=True)
                 self._log(self.log_box, f"\n[{i+1}/{len(targets)}] {Path(src).name}\n")
                 try:
@@ -339,7 +388,7 @@ class PdfPageTab(BaseTab):
         self._make_output_row(self, frm_cfg, 1, self.var_out)
         self.var_delete = tk.BooleanVar(value=False)
         ttk.Checkbutton(frm_cfg, text="분할 후 원본 삭제", variable=self.var_delete).grid(
-            row=2, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
+            row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
 
         frm_btn = ttk.Frame(self)
         frm_btn.grid(row=2, column=0, **pad)
@@ -370,7 +419,7 @@ class PdfPageTab(BaseTab):
         def worker():
             done, failed = 0, 0
             for i, src in enumerate(self.selected_paths):
-                out_dir = Path(out_val) if out_val != "(원본과 동일)" else Path(src).parent
+                out_dir = self._resolve_output_dir(src, self.var_out)
                 out_dir.mkdir(parents=True, exist_ok=True)
                 total_pages = fitz.open(src).page_count
                 self._log(self.log_box, f"\n[{i+1}/{len(self.selected_paths)}] {Path(src).name}  ({total_pages}p)\n")
@@ -414,7 +463,7 @@ class AudioConvertTab(BaseTab):
         self._make_output_row(self, frm_cfg, 1, self.var_out)
         self.var_delete = tk.BooleanVar(value=False)
         ttk.Checkbutton(frm_cfg, text="변환 후 원본 삭제", variable=self.var_delete).grid(
-            row=2, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
+            row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
 
         frm_btn = ttk.Frame(self)
         frm_btn.grid(row=2, column=0, **pad)
@@ -438,7 +487,7 @@ class AudioConvertTab(BaseTab):
         def worker():
             done, failed, skipped = 0, 0, 0
             for i, src in enumerate(self.selected_paths):
-                out_dir = Path(out_val) if out_val != "(원본과 동일)" else Path(src).parent
+                out_dir = self._resolve_output_dir(src, self.var_out)
                 out_dir.mkdir(parents=True, exist_ok=True)
                 out_path = out_dir / (Path(src).stem + ".m4a")
 
@@ -488,13 +537,13 @@ class AudioSplitTab(BaseTab):
         frm_cfg = ttk.LabelFrame(self, text="설정")
         frm_cfg.grid(row=1, column=0, sticky="ew", **pad)
         ttk.Label(frm_cfg, text="최대 크기 (MB):").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        self.var_mb = tk.StringVar(value="200")
+        self.var_mb = tk.StringVar(value="100")
         ttk.Entry(frm_cfg, textvariable=self.var_mb, width=8).grid(row=0, column=1, sticky="w", pady=4)
         self.var_out = tk.StringVar(value="(원본과 동일)")
         self._make_output_row(self, frm_cfg, 1, self.var_out)
         self.var_delete = tk.BooleanVar(value=False)
         ttk.Checkbutton(frm_cfg, text="분할 후 원본 삭제", variable=self.var_delete).grid(
-            row=2, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
+            row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
 
         frm_btn = ttk.Frame(self)
         frm_btn.grid(row=2, column=0, **pad)
@@ -542,7 +591,7 @@ class AudioSplitTab(BaseTab):
         def worker():
             done, failed = 0, 0
             for i, src in enumerate(targets):
-                out_dir = Path(out_val) if out_val != "(원본과 동일)" else Path(src).parent
+                out_dir = self._resolve_output_dir(src, self.var_out)
                 out_dir.mkdir(parents=True, exist_ok=True)
                 src_mb = get_mb(src)
                 self._log(self.log_box, f"\n[{i+1}/{len(targets)}] {Path(src).name}  ({src_mb:.1f} MB)\n")
