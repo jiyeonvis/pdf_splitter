@@ -27,7 +27,7 @@ jobs:
           python-version: "3.12"
 
       - name: 의존성 설치
-        run: pip install pymupdf pyinstaller
+        run: pip install pymupdf pyqt6 pyinstaller
 
       - name: ffmpeg 설치 (macOS)
         if: matrix.os == 'macos-latest'

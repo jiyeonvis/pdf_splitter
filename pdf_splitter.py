@@ -1,8 +1,7 @@
 """
-PDF & 오디오 도구
+PDF & 오디오 도구 (PyQt6)
 실행: python3.13 pdf_splitter.py
-의존성: pip install pymupdf
-ffmpeg: 앱 폴더 또는 시스템에 설치 필요
+의존성: pip install pymupdf pyqt6
 """
 
 import os
@@ -12,37 +11,39 @@ import tempfile
 import threading
 import subprocess
 from pathlib import Path
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QTabWidget,
+    QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
+    QPushButton, QLabel, QLineEdit, QCheckBox, QComboBox,
+    QProgressBar, QTextEdit, QListWidget, QFileDialog, QMessageBox
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QObject
+from PyQt6.QtGui import QFont
 
 try:
-    import fitz  # PyMuPDF
+    import fitz
 except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pymupdf"])
     import fitz
 
 
-# ── ffmpeg 경로 ────────────────────────────────────────────────
+# ── ffmpeg & utils ─────────────────────────────────────────────
 
 def get_ffmpeg():
-    """번들된 ffmpeg 또는 시스템 ffmpeg 경로 반환"""
     if hasattr(sys, "_MEIPASS"):
-        bundled = Path(sys._MEIPASS) / "ffmpeg"
-        if bundled.exists():
-            return str(bundled)
-        bundled_exe = Path(sys._MEIPASS) / "ffmpeg.exe"
-        if bundled_exe.exists():
-            return str(bundled_exe)
+        for name in ("ffmpeg", "ffmpeg.exe"):
+            p = Path(sys._MEIPASS) / name
+            if p.exists():
+                return str(p)
     return "ffmpeg"
 
-
-# ── 공통 유틸 ──────────────────────────────────────────────────
 
 def get_mb(path):
     return Path(path).stat().st_size / (1024 * 1024)
 
 
-# ── PDF 용량 분할 로직 ─────────────────────────────────────────
+# ── PDF 로직 ───────────────────────────────────────────────────
 
 def split_pdf_by_size(src, max_mb, output_dir, log):
     doc = fitz.open(src)
@@ -50,7 +51,6 @@ def split_pdf_by_size(src, max_mb, output_dir, log):
     src_mb = get_mb(src)
     estimated = max(1, int(total * (max_mb / src_mb) * 0.85))
     parts, page_idx, part_num = [], 0, 1
-
     while page_idx < total:
         chunk_size = estimated
         while True:
@@ -66,28 +66,22 @@ def split_pdf_by_size(src, max_mb, output_dir, log):
                 break
             os.unlink(tmp_path)
             chunk_size = max(1, int(chunk_size * (max_mb / chunk_mb) * 0.9))
-
         out_name = f"{Path(src).stem}_part{part_num}.pdf"
         out_path = str(Path(output_dir) / out_name)
         shutil.move(tmp_path, out_path)
-        pages = end - page_idx
-        log(f"    → {out_name}  ({pages}p, {chunk_mb:.1f} MB)\n")
+        log(f"    → {out_name}  ({end - page_idx}p, {chunk_mb:.1f} MB)", "")
         parts.append(out_path)
         page_idx = end
         part_num += 1
-        estimated = pages
-
+        estimated = end - (page_idx - (end - page_idx))
     doc.close()
     return parts
 
-
-# ── PDF 페이지 분할 로직 ───────────────────────────────────────
 
 def split_pdf_by_pages(src, pages_per_chunk, output_dir, log):
     doc = fitz.open(src)
     total = doc.page_count
     parts, page_idx, part_num = [], 0, 1
-
     while page_idx < total:
         end = min(page_idx + pages_per_chunk, total)
         chunk = fitz.open()
@@ -97,222 +91,300 @@ def split_pdf_by_pages(src, pages_per_chunk, output_dir, log):
         chunk.save(tmp_path, garbage=4, deflate=True)
         chunk.close()
         chunk_mb = get_mb(tmp_path)
-
         out_name = f"{Path(src).stem}_part{part_num}.pdf"
         out_path = str(Path(output_dir) / out_name)
         shutil.move(tmp_path, out_path)
-        log(f"    → {out_name}  ({end - page_idx}p, {chunk_mb:.1f} MB)\n")
+        log(f"    → {out_name}  ({end - page_idx}p, {chunk_mb:.1f} MB)", "")
         parts.append(out_path)
         page_idx = end
         part_num += 1
-
     doc.close()
     return parts
 
 
-# ── GUI ────────────────────────────────────────────────────────
+# ── Worker 시그널 ──────────────────────────────────────────────
 
-class App(tk.Tk):
+class WorkerSignals(QObject):
+    log = pyqtSignal(str, str)   # (메시지, 색상태그)
+    progress = pyqtSignal(int)
+    finished = pyqtSignal()
+
+
+# ── 베이스 탭 ──────────────────────────────────────────────────
+
+class BaseTab(QWidget):
     def __init__(self):
         super().__init__()
-        self.title("PDF & 오디오 도구")
-        self.resizable(False, False)
-        self._build_ui()
-        self.update_idletasks()
-        self.lift()
-        self.focus_force()
-
-    def _build_ui(self):
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, padx=12, pady=12)
-
-        self.tab1 = PdfSizeTab(notebook)
-        self.tab2 = PdfPageTab(notebook)
-        self.tab3 = AudioConvertTab(notebook)
-        self.tab4 = AudioSplitTab(notebook)
-
-        notebook.add(self.tab1, text="  PDF 용량 분할  ")
-        notebook.add(self.tab2, text="  PDF 페이지 분할  ")
-        notebook.add(self.tab3, text="  오디오 → m4a  ")
-        notebook.add(self.tab4, text="  오디오 용량 분할  ")
-
-
-# ── 공통 탭 베이스 ─────────────────────────────────────────────
-
-class BaseTab(ttk.Frame):
-    def __init__(self, parent):
-        super().__init__(parent)
         self.selected_paths = []
-        self.selected_folder = None   # 폴더 선택 시 루트 경로 저장
-        self.var_recursive = tk.BooleanVar(value=False)
-        self.var_keep_structure = tk.BooleanVar(value=False)
-        self._build()
+        self.selected_folder = None
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        self._build(layout)
 
-    def _build(self):
+    def _build(self, layout):
         raise NotImplementedError
 
-    def _make_log(self, parent, row):
-        frm = ttk.Frame(parent)
-        frm.grid(row=row, column=0, padx=12, pady=(0, 12), sticky="ew")
-        log_box = tk.Text(frm, height=12, width=54, state="disabled",
-                          bg="#1e1e1e", fg="#d4d4d4", font=("Courier", 10))
-        sb = ttk.Scrollbar(frm, command=log_box.yview)
-        log_box.configure(yscrollcommand=sb.set)
-        log_box.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-        return log_box
+    # ── 공통 위젯 빌더 ──
 
-    def _log(self, log_box, msg, tag=None):
-        log_box.config(state="normal")
-        if tag:
-            log_box.insert("end", msg, tag)
-            log_box.tag_config("warn", foreground="#f0a500")
-            log_box.tag_config("ok", foreground="#4ec94e")
-            log_box.tag_config("err", foreground="#f55")
-        else:
-            log_box.insert("end", msg)
-        log_box.see("end")
-        log_box.config(state="disabled")
+    def _input_group(self, ext_filter):
+        group = QGroupBox("입력")
+        vbox = QVBoxLayout(group)
 
-    def _clear_log(self, log_box):
-        log_box.config(state="normal")
-        log_box.delete("1.0", "end")
-        log_box.config(state="disabled")
+        btn_row = QHBoxLayout()
+        self.btn_folder = QPushButton("📂 폴더 선택")
+        self.btn_files  = QPushButton("📄 파일 선택")
+        self.chk_recursive = QCheckBox("하위 폴더 포함")
+        btn_row.addWidget(self.btn_folder)
+        btn_row.addWidget(self.btn_files)
+        btn_row.addWidget(self.chk_recursive)
+        btn_row.addStretch()
 
-    def _pick_folder(self, filetypes=None):
-        folder = filedialog.askdirectory()
-        if not folder:
-            return None, []
-        recursive = self.var_recursive.get()
-        if filetypes:
-            exts = set()
-            for _, pattern in filetypes:
-                for p in pattern.split():
-                    exts.add(p.lstrip("*").lower())
-            glob = "**/*" if recursive else "*"
-            paths = [str(p) for p in Path(folder).glob(glob)
-                     if p.is_file() and p.suffix.lower() in exts]
-        else:
-            pattern = "**/*.pdf" if recursive else "*.pdf"
-            paths = [str(p) for p in Path(folder).glob(pattern) if p.is_file()]
-        return folder, paths
+        self.lbl_selected = QLabel("선택된 항목 없음")
+        self.lbl_selected.setStyleSheet("color: gray;")
 
-    def _pick_files(self, filetypes):
-        files = filedialog.askopenfilenames(filetypes=filetypes)
-        return list(files)
+        self.lbl_path = QLabel("")
+        self.lbl_path.setStyleSheet("color: #888; font-size: 11px;")
+        self.lbl_path.setWordWrap(True)
 
-    def _make_file_buttons(self, parent, row, filetypes, label_var, filetypes_label="PDF"):
-        frm = ttk.LabelFrame(parent, text="입력")
-        frm.grid(row=row, column=0, sticky="ew", padx=12, pady=6)
+        lbl_list = QLabel("선택된 파일:")
+        self.file_list = QListWidget()
+        self.file_list.setFixedHeight(100)
+        self.file_list.setFont(QFont("Courier", 10))
+        self.file_list.setStyleSheet("""
+            QListWidget {
+                background: #2a2a2a;
+                color: #d4d4d4;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 2px;
+            }
+            QListWidget::item { padding: 2px 4px; }
+            QListWidget::item:selected { background: #3a3a5a; }
+        """)
 
-        # 파일 목록 리스트박스
-        frm_list = ttk.Frame(frm)
-        frm_list.grid(row=2, column=0, columnspan=3, padx=6, pady=(0, 6), sticky="ew")
-        listbox = tk.Listbox(frm_list, height=5, width=54,
-                             bg="#2a2a2a", fg="#d4d4d4", font=("Courier", 10),
-                             selectmode="extended", activestyle="none")
-        sb_list = ttk.Scrollbar(frm_list, command=listbox.yview)
-        listbox.configure(yscrollcommand=sb_list.set)
-        listbox.pack(side="left", fill="both", expand=True)
-        sb_list.pack(side="right", fill="y")
+        vbox.addLayout(btn_row)
+        vbox.addWidget(self.lbl_selected)
+        vbox.addWidget(self.lbl_path)
+        vbox.addWidget(lbl_list)
+        vbox.addWidget(self.file_list)
 
-        def refresh_list(paths):
-            listbox.delete(0, "end")
-            for p in sorted(paths):
-                listbox.insert("end", Path(p).name)
+        self._last_ext_filter = ext_filter  # 재스캔에 사용
 
-        def on_folder():
-            folder, paths = self._pick_folder(filetypes)
-            if paths:
-                self.selected_paths = paths
-                self.selected_folder = folder
-                label_var.set(f"폴더 선택됨  ({len(paths)}개 파일)")
-                refresh_list(paths)
+        self.btn_folder.clicked.connect(lambda: self._pick_folder(ext_filter))
+        self.btn_files.clicked.connect(lambda: self._pick_files(ext_filter))
+        self.chk_recursive.stateChanged.connect(self._rescan_folder)
+        return group
 
-        def on_files():
-            paths = self._pick_files(filetypes)
-            if paths:
-                self.selected_paths = paths
-                self.selected_folder = None
-                label_var.set(f"파일 {len(paths)}개 선택됨")
-                refresh_list(paths)
+    def _output_group(self, extra_widgets=None):
+        group = QGroupBox("출력")
+        grid = QGridLayout(group)
 
-        ttk.Button(frm, text="📂 폴더 선택", command=on_folder).grid(row=0, column=0, padx=6, pady=6)
-        ttk.Button(frm, text="📄 파일 선택", command=on_files).grid(row=0, column=1, padx=6, pady=6)
-        ttk.Checkbutton(frm, text="하위 폴더 포함", variable=self.var_recursive).grid(
-            row=0, column=2, padx=6, pady=6)
-        ttk.Label(frm, textvariable=label_var, foreground="gray").grid(
-            row=1, column=0, columnspan=3, padx=6, pady=(0, 2), sticky="w")
-        return frm
+        self.out_edit = QLineEdit("(원본과 동일)")
+        btn_browse = QPushButton("찾아보기")
+        btn_browse.clicked.connect(self._browse_output)
+        self.chk_keep = QCheckBox("하위 폴더 구조 유지")
+        self.chk_delete = QCheckBox("처리 후 원본 삭제")
 
-    def _make_output_row(self, parent, frm_cfg, row, var_out):
-        ttk.Label(frm_cfg, text="출력 폴더:").grid(row=row, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(frm_cfg, textvariable=var_out, width=30).grid(row=row, column=1, pady=4)
-        ttk.Button(frm_cfg, text="찾아보기",
-                   command=lambda: var_out.set(filedialog.askdirectory() or var_out.get())
-                   ).grid(row=row, column=2, padx=6, pady=4)
-        ttk.Checkbutton(frm_cfg, text="하위 폴더 구조 유지", variable=self.var_keep_structure).grid(
-            row=row + 1, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 2))
+        grid.addWidget(QLabel("출력 폴더:"), 0, 0)
+        grid.addWidget(self.out_edit, 0, 1)
+        grid.addWidget(btn_browse, 0, 2)
+        grid.addWidget(self.chk_keep, 1, 0, 1, 3)
+        grid.addWidget(self.chk_delete, 2, 0, 1, 3)
 
-    def _make_progress(self, parent, row):
-        pb = ttk.Progressbar(parent, length=400, mode="determinate")
-        pb.grid(row=row, column=0, padx=12, pady=(0, 4), sticky="ew")
+        if extra_widgets:
+            for i, w in enumerate(extra_widgets, start=3):
+                grid.addWidget(w, i, 0, 1, 3)
+        return group
+
+    def _log_widget(self):
+        w = QTextEdit()
+        w.setReadOnly(True)
+        w.setFont(QFont("Courier", 10))
+        w.setMinimumHeight(160)
+        w.setStyleSheet("QTextEdit { background:#1e1e1e; color:#d4d4d4; border:none; }")
+        return w
+
+    def _progress_widget(self):
+        pb = QProgressBar()
+        pb.setValue(0)
         return pb
 
-    def _resolve_output_dir(self, src, var_out):
-        """출력 폴더 결정. 하위 폴더 구조 유지 옵션 반영."""
-        out_val = var_out.get()
-        if out_val == "(원본과 동일)":
+    # ── 헬퍼 ──
+
+    def _pick_folder(self, ext_filter):
+        folder = QFileDialog.getExistingDirectory(self, "폴더 선택")
+        if not folder:
+            return
+        exts = self._parse_exts(ext_filter)
+        glob = "**/*" if self.chk_recursive.isChecked() else "*"
+        paths = [str(p) for p in Path(folder).glob(glob)
+                 if p.is_file() and p.suffix.lower() in exts]
+        self.selected_paths = paths
+        self.selected_folder = folder
+        self.lbl_selected.setText(f"폴더 선택됨  ({len(paths)}개 파일)")
+        self.lbl_path.setText(folder)
+        self._refresh_list(paths)
+        self._on_selection_changed()
+
+    def _pick_files(self, ext_filter):
+        files, _ = QFileDialog.getOpenFileNames(self, "파일 선택", "", ext_filter)
+        if not files:
+            return
+        self.selected_paths = list(files)
+        self.selected_folder = None
+        self.lbl_selected.setText(f"파일 {len(files)}개 선택됨")
+        self.lbl_path.setText("")
+        self._refresh_list(files)
+        self._on_selection_changed()
+
+    def _browse_output(self):
+        folder = QFileDialog.getExistingDirectory(self, "출력 폴더")
+        if folder:
+            self.out_edit.setText(folder)
+
+    def _parse_exts(self, ext_filter):
+        exts = set()
+        if "(" in ext_filter:
+            inner = ext_filter.split("(")[1].rstrip(")")
+            for part in inner.split():
+                exts.add(part.lstrip("*").lower())
+        return exts
+
+    def _refresh_list(self, paths):
+        self.file_list.clear()
+        for p in sorted(paths):
+            self.file_list.addItem(Path(p).name)
+
+    def _rescan_folder(self):
+        """체크박스 변경 시 선택된 폴더를 다시 스캔 (스레드)"""
+        if not self.selected_folder:
+            return
+
+        # 로딩 UI
+        self.lbl_selected.setText("🔄 스캔 중...")
+        self.file_list.clear()
+        self.btn_folder.setEnabled(False)
+        self.btn_files.setEnabled(False)
+        self.chk_recursive.setEnabled(False)
+
+        signals = WorkerSignals()
+        signals.finished.connect(lambda: None)  # placeholder
+
+        def work():
+            exts = self._parse_exts(self._last_ext_filter)
+            glob = "**/*" if self.chk_recursive.isChecked() else "*"
+            paths = [str(p) for p in Path(self.selected_folder).glob(glob)
+                     if p.is_file() and p.suffix.lower() in exts]
+            signals.log.emit("__done__", str(len(paths)))
+            for p in sorted(paths):
+                signals.log.emit("__item__", str(p))
+
+        def on_msg(msg, data):
+            if msg == "__done__":
+                self.selected_paths = []
+                self.file_list.clear()
+                self.lbl_selected.setText(f"폴더 선택됨  ({data}개 파일)")
+                self.btn_folder.setEnabled(True)
+                self.btn_files.setEnabled(True)
+                self.chk_recursive.setEnabled(True)
+                self._on_selection_changed()
+            elif msg == "__item__":
+                self.selected_paths.append(data)
+                self.file_list.addItem(Path(data).name)
+
+        signals.log.connect(on_msg)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_selection_changed(self):
+        """각 탭에서 오버라이드 가능"""
+        pass
+
+    def _resolve_out(self, src):
+        val = self.out_edit.text()
+        if val == "(원본과 동일)":
             return Path(src).parent
-        out_base = Path(out_val)
-        if self.var_keep_structure.get() and self.selected_folder:
+        base = Path(val)
+        if self.chk_keep.isChecked() and self.selected_folder:
             try:
                 rel = Path(src).parent.relative_to(self.selected_folder)
-                return out_base / rel
+                return base / rel
             except ValueError:
                 pass
-        return out_base
+        return base
+
+    def _append_log(self, log_widget, msg, tag=""):
+        colors = {"warn": "#f0a500", "ok": "#4ec94e", "err": "#ff5555", "": "#d4d4d4"}
+        color = colors.get(tag, "#d4d4d4")
+        safe = msg.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        log_widget.append(f'<span style="color:{color};">{safe}</span>')
+
+    def _set_ui_running(self, running, *buttons):
+        for btn in buttons:
+            btn.setEnabled(not running)
+
+    def _launch(self, signals, fn, *buttons):
+        self._set_ui_running(True, *buttons)
+        signals.finished.connect(lambda: self._set_ui_running(False, *buttons))
+        threading.Thread(target=fn, daemon=True).start()
 
 
 # ── 탭 1: PDF 용량 분할 ────────────────────────────────────────
 
 class PdfSizeTab(BaseTab):
-    def _build(self):
-        pad = dict(padx=12, pady=6)
-        self.var_label = tk.StringVar(value="선택된 항목 없음")
-        self._make_file_buttons(self, 0, [("PDF", "*.pdf")], self.var_label)
+    def _build(self, layout):
+        layout.addWidget(self._input_group("PDF 파일 (*.pdf)"))
 
-        frm_cfg = ttk.LabelFrame(self, text="설정")
-        frm_cfg.grid(row=1, column=0, sticky="ew", **pad)
-        ttk.Label(frm_cfg, text="최대 크기 (MB):").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        self.var_mb = tk.StringVar(value="200")
-        ttk.Entry(frm_cfg, textvariable=self.var_mb, width=8).grid(row=0, column=1, sticky="w", pady=4)
-        self.var_out = tk.StringVar(value="(원본과 동일)")
-        self._make_output_row(self, frm_cfg, 1, self.var_out)
-        self.var_delete = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frm_cfg, text="분할 후 원본 삭제", variable=self.var_delete).grid(
-            row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
+        # 설정
+        cfg = QGroupBox("설정")
+        grid = QGridLayout(cfg)
+        self.mb_edit = QLineEdit("200")
+        self.mb_edit.setFixedWidth(70)
+        self.out_edit = QLineEdit("(원본과 동일)")
+        btn_browse = QPushButton("찾아보기")
+        btn_browse.clicked.connect(self._browse_output)
+        self.chk_keep   = QCheckBox("하위 폴더 구조 유지")
+        self.chk_delete = QCheckBox("분할 후 원본 삭제")
+        grid.addWidget(QLabel("최대 크기 (MB):"), 0, 0)
+        grid.addWidget(self.mb_edit, 0, 1, Qt.AlignmentFlag.AlignLeft)
+        grid.addWidget(QLabel("출력 폴더:"), 1, 0)
+        grid.addWidget(self.out_edit, 1, 1)
+        grid.addWidget(btn_browse, 1, 2)
+        grid.addWidget(self.chk_keep, 2, 0, 1, 3)
+        grid.addWidget(self.chk_delete, 3, 0, 1, 3)
+        layout.addWidget(cfg)
 
-        frm_btn = ttk.Frame(self)
-        frm_btn.grid(row=2, column=0, **pad)
-        self.btn_scan = ttk.Button(frm_btn, text="🔍 스캔", command=self.scan, width=14)
-        self.btn_scan.grid(row=0, column=0, padx=6)
-        self.btn_run = ttk.Button(frm_btn, text="▶ 분할 시작", command=self.run, width=14, state="disabled")
-        self.btn_run.grid(row=0, column=1, padx=6)
+        # 버튼
+        btn_row = QHBoxLayout()
+        self.btn_scan = QPushButton("🔍 스캔")
+        self.btn_run  = QPushButton("▶ 분할 시작")
+        self.btn_run.setEnabled(False)
+        btn_row.addWidget(self.btn_scan)
+        btn_row.addWidget(self.btn_run)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
 
-        self.progress = self._make_progress(self, 3)
-        self.log_box = self._make_log(self, 4)
+        self.progress = self._progress_widget()
+        self.log = self._log_widget()
+        layout.addWidget(self.progress)
+        layout.addWidget(self.log)
+
+        self.btn_scan.clicked.connect(self.scan)
+        self.btn_run.clicked.connect(self.run)
+
+    def _on_selection_changed(self):
+        self.btn_run.setEnabled(False)
 
     def scan(self):
         if not self.selected_paths:
-            messagebox.showwarning("알림", "먼저 폴더나 파일을 선택하세요.")
+            QMessageBox.warning(self, "알림", "먼저 폴더나 파일을 선택하세요.")
             return
         try:
-            max_mb = float(self.var_mb.get())
+            max_mb = float(self.mb_edit.text())
         except ValueError:
-            messagebox.showerror("오류", "크기는 숫자로 입력하세요.")
+            QMessageBox.critical(self, "오류", "크기는 숫자로 입력하세요.")
             return
-        self._clear_log(self.log_box)
+
+        self.log.clear()
         over, ok = [], []
         for p in self.selected_paths:
             mb = get_mb(p)
@@ -320,267 +392,286 @@ class PdfSizeTab(BaseTab):
         over.sort(key=lambda x: x[1])
         ok.sort(key=lambda x: x[1])
 
-        self._log(self.log_box, f"── 스캔 결과 (기준: {max_mb} MB) ──\n")
+        self._append_log(self.log, f"── 스캔 결과 (기준: {max_mb} MB) ──")
         if ok:
-            self._log(self.log_box, f"✔ 기준 이하 (건너뜀): {len(ok)}개\n", "ok")
+            self._append_log(self.log, f"✔ 기준 이하 (건너뜀): {len(ok)}개", "ok")
             for p, mb in ok:
-                self._log(self.log_box, f"  • {Path(p).name}  ({mb:.1f} MB)\n", "ok")
+                self._append_log(self.log, f"  • {Path(p).name}  ({mb:.1f} MB)", "ok")
         if over:
-            self._log(self.log_box, f"\n⚠️  분할 필요: {len(over)}개\n")
+            self._append_log(self.log, f"\n⚠️  분할 필요: {len(over)}개", "warn")
             for p, mb in over:
-                self._log(self.log_box, f"  • {Path(p).name}  ({mb:.1f} MB)\n", "warn")
+                self._append_log(self.log, f"  • {Path(p).name}  ({mb:.1f} MB)", "warn")
         else:
-            self._log(self.log_box, "\n✅ 모든 파일이 기준 이하입니다.\n")
-        self.btn_run.config(state="normal" if over else "disabled")
+            self._append_log(self.log, "\n✅ 모든 파일이 기준 이하입니다.", "ok")
+        self.btn_run.setEnabled(bool(over))
 
     def run(self):
         try:
-            max_mb = float(self.var_mb.get())
+            max_mb = float(self.mb_edit.text())
         except ValueError:
-            messagebox.showerror("오류", "크기는 숫자로 입력하세요.")
+            QMessageBox.critical(self, "오류", "크기는 숫자로 입력하세요.")
             return
-        out_val = self.var_out.get()
         targets = [p for p in self.selected_paths if get_mb(p) > max_mb]
-        self.btn_scan.config(state="disabled")
-        self.btn_run.config(state="disabled")
-        self.progress["maximum"] = len(targets)
-        self.progress["value"] = 0
+        if not targets:
+            return
 
-        def worker():
-            done, failed = 0, 0
+        signals = WorkerSignals()
+        signals.log.connect(lambda m, t: self._append_log(self.log, m, t))
+        signals.progress.connect(self.progress.setValue)
+        self.progress.setMaximum(len(targets))
+
+        def work():
+            done = failed = 0
             for i, src in enumerate(targets):
-                out_dir = self._resolve_output_dir(src, self.var_out)
+                out_dir = self._resolve_out(src)
                 out_dir.mkdir(parents=True, exist_ok=True)
-                self._log(self.log_box, f"\n[{i+1}/{len(targets)}] {Path(src).name}\n")
+                signals.log.emit(f"\n[{i+1}/{len(targets)}] {Path(src).name}", "")
                 try:
                     parts = split_pdf_by_size(src, max_mb, out_dir,
-                                              lambda m: self._log(self.log_box, m))
+                                              lambda m, t: signals.log.emit(m, t))
                     done += 1
-                    if self.var_delete.get() and parts:
+                    if self.chk_delete.isChecked() and parts:
                         Path(src).unlink()
-                        self._log(self.log_box, "    원본 삭제됨\n", "warn")
+                        signals.log.emit("    원본 삭제됨", "warn")
                 except Exception as e:
-                    self._log(self.log_box, f"    ❌ 오류: {e}\n", "err")
+                    signals.log.emit(f"    ❌ 오류: {e}", "err")
                     failed += 1
-                self.progress["value"] = i + 1
-                self.update_idletasks()
-            self._log(self.log_box, f"\n── 완료: {done}개 분할, {failed}개 실패 ──\n")
-            self.btn_scan.config(state="normal")
-            self.btn_run.config(state="normal")
+                signals.progress.emit(i + 1)
+            signals.log.emit(f"\n── 완료: {done}개 분할, {failed}개 실패 ──", "")
+            signals.finished.emit()
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._launch(signals, work, self.btn_scan, self.btn_run)
 
 
 # ── 탭 2: PDF 페이지 분할 ──────────────────────────────────────
 
 class PdfPageTab(BaseTab):
-    def _build(self):
-        pad = dict(padx=12, pady=6)
-        self.var_label = tk.StringVar(value="선택된 항목 없음")
-        self._make_file_buttons(self, 0, [("PDF", "*.pdf")], self.var_label)
+    def _build(self, layout):
+        layout.addWidget(self._input_group("PDF 파일 (*.pdf)"))
 
-        frm_cfg = ttk.LabelFrame(self, text="설정")
-        frm_cfg.grid(row=1, column=0, sticky="ew", **pad)
-        ttk.Label(frm_cfg, text="페이지 수 (N):").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        self.var_pages = tk.StringVar(value="50")
-        ttk.Entry(frm_cfg, textvariable=self.var_pages, width=8).grid(row=0, column=1, sticky="w", pady=4)
-        self.var_out = tk.StringVar(value="(원본과 동일)")
-        self._make_output_row(self, frm_cfg, 1, self.var_out)
-        self.var_delete = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frm_cfg, text="분할 후 원본 삭제", variable=self.var_delete).grid(
-            row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
+        cfg = QGroupBox("설정")
+        grid = QGridLayout(cfg)
+        self.pages_edit = QLineEdit("50")
+        self.pages_edit.setFixedWidth(70)
+        self.out_edit   = QLineEdit("(원본과 동일)")
+        btn_browse = QPushButton("찾아보기")
+        btn_browse.clicked.connect(self._browse_output)
+        self.chk_keep   = QCheckBox("하위 폴더 구조 유지")
+        self.chk_delete = QCheckBox("분할 후 원본 삭제")
+        grid.addWidget(QLabel("페이지 수 (N):"), 0, 0)
+        grid.addWidget(self.pages_edit, 0, 1, Qt.AlignmentFlag.AlignLeft)
+        grid.addWidget(QLabel("출력 폴더:"), 1, 0)
+        grid.addWidget(self.out_edit, 1, 1)
+        grid.addWidget(btn_browse, 1, 2)
+        grid.addWidget(self.chk_keep, 2, 0, 1, 3)
+        grid.addWidget(self.chk_delete, 3, 0, 1, 3)
+        layout.addWidget(cfg)
 
-        frm_btn = ttk.Frame(self)
-        frm_btn.grid(row=2, column=0, **pad)
-        self.btn_run = ttk.Button(frm_btn, text="▶ 분할 시작", command=self.run, width=14)
-        self.btn_run.grid(row=0, column=0, padx=6)
+        btn_row = QHBoxLayout()
+        self.btn_run = QPushButton("▶ 분할 시작")
+        btn_row.addWidget(self.btn_run)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
 
-        self.progress = self._make_progress(self, 3)
-        self.log_box = self._make_log(self, 4)
+        self.progress = self._progress_widget()
+        self.log = self._log_widget()
+        layout.addWidget(self.progress)
+        layout.addWidget(self.log)
+
+        self.btn_run.clicked.connect(self.run)
 
     def run(self):
         if not self.selected_paths:
-            messagebox.showwarning("알림", "먼저 폴더나 파일을 선택하세요.")
+            QMessageBox.warning(self, "알림", "먼저 폴더나 파일을 선택하세요.")
             return
         try:
-            pages_per_chunk = int(self.var_pages.get())
-            if pages_per_chunk < 1:
+            n = int(self.pages_edit.text())
+            if n < 1:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("오류", "페이지 수는 1 이상의 정수로 입력하세요.")
+            QMessageBox.critical(self, "오류", "페이지 수는 1 이상의 정수로 입력하세요.")
             return
 
-        out_val = self.var_out.get()
-        self.btn_run.config(state="disabled")
-        self.progress["maximum"] = len(self.selected_paths)
-        self.progress["value"] = 0
-        self._clear_log(self.log_box)
+        signals = WorkerSignals()
+        signals.log.connect(lambda m, t: self._append_log(self.log, m, t))
+        signals.progress.connect(self.progress.setValue)
+        self.progress.setMaximum(len(self.selected_paths))
+        self.log.clear()
 
-        def worker():
-            done, failed = 0, 0
+        def work():
+            done = failed = 0
             for i, src in enumerate(self.selected_paths):
-                out_dir = self._resolve_output_dir(src, self.var_out)
+                out_dir = self._resolve_out(src)
                 out_dir.mkdir(parents=True, exist_ok=True)
-                total_pages = fitz.open(src).page_count
-                self._log(self.log_box, f"\n[{i+1}/{len(self.selected_paths)}] {Path(src).name}  ({total_pages}p)\n")
+                total_p = fitz.open(src).page_count
+                signals.log.emit(f"\n[{i+1}/{len(self.selected_paths)}] {Path(src).name}  ({total_p}p)", "")
                 try:
-                    parts = split_pdf_by_pages(src, pages_per_chunk, out_dir,
-                                               lambda m: self._log(self.log_box, m))
+                    parts = split_pdf_by_pages(src, n, out_dir,
+                                               lambda m, t: signals.log.emit(m, t))
                     done += 1
-                    if self.var_delete.get() and parts:
+                    if self.chk_delete.isChecked() and parts:
                         Path(src).unlink()
-                        self._log(self.log_box, "    원본 삭제됨\n", "warn")
+                        signals.log.emit("    원본 삭제됨", "warn")
                 except Exception as e:
-                    self._log(self.log_box, f"    ❌ 오류: {e}\n", "err")
+                    signals.log.emit(f"    ❌ 오류: {e}", "err")
                     failed += 1
-                self.progress["value"] = i + 1
-                self.update_idletasks()
-            self._log(self.log_box, f"\n── 완료: {done}개 분할, {failed}개 실패 ──\n")
-            self.btn_run.config(state="normal")
+                signals.progress.emit(i + 1)
+            signals.log.emit(f"\n── 완료: {done}개 분할, {failed}개 실패 ──", "")
+            signals.finished.emit()
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._launch(signals, work, self.btn_run)
 
 
-# ── 탭 3: 오디오 → m4a 변환 ────────────────────────────────────
+# ── 탭 3: 오디오 → m4a ────────────────────────────────────────
 
-AUDIO_TYPES = [("오디오 파일", "*.mp3 *.wav *.aac *.flac *.ogg *.wma *.m4a")]
-AUDIO_EXTS = {".mp3", ".wav", ".aac", ".flac", ".ogg", ".wma", ".m4a"}
+AUDIO_FILTER = "오디오 파일 (*.mp3 *.wav *.aac *.flac *.ogg *.wma *.m4a)"
 
 class AudioConvertTab(BaseTab):
-    def _build(self):
-        pad = dict(padx=12, pady=6)
-        self.var_label = tk.StringVar(value="선택된 항목 없음")
-        self._make_file_buttons(self, 0, AUDIO_TYPES, self.var_label)
+    def _build(self, layout):
+        layout.addWidget(self._input_group(AUDIO_FILTER))
 
-        frm_cfg = ttk.LabelFrame(self, text="설정")
-        frm_cfg.grid(row=1, column=0, sticky="ew", **pad)
-        ttk.Label(frm_cfg, text="비트레이트:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        self.var_bitrate = tk.StringVar(value="128k")
-        cb = ttk.Combobox(frm_cfg, textvariable=self.var_bitrate, width=8,
-                          values=["64k", "96k", "128k", "192k", "256k"], state="readonly")
-        cb.grid(row=0, column=1, sticky="w", pady=4)
-        self.var_out = tk.StringVar(value="(원본과 동일)")
-        self._make_output_row(self, frm_cfg, 1, self.var_out)
-        self.var_delete = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frm_cfg, text="변환 후 원본 삭제", variable=self.var_delete).grid(
-            row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
+        cfg = QGroupBox("설정")
+        grid = QGridLayout(cfg)
+        self.bitrate_combo = QComboBox()
+        self.bitrate_combo.addItems(["64k", "96k", "128k", "192k", "256k"])
+        self.bitrate_combo.setCurrentText("128k")
+        self.out_edit   = QLineEdit("(원본과 동일)")
+        btn_browse = QPushButton("찾아보기")
+        btn_browse.clicked.connect(self._browse_output)
+        self.chk_keep   = QCheckBox("하위 폴더 구조 유지")
+        self.chk_delete = QCheckBox("변환 후 원본 삭제")
+        grid.addWidget(QLabel("비트레이트:"), 0, 0)
+        grid.addWidget(self.bitrate_combo, 0, 1, Qt.AlignmentFlag.AlignLeft)
+        grid.addWidget(QLabel("출력 폴더:"), 1, 0)
+        grid.addWidget(self.out_edit, 1, 1)
+        grid.addWidget(btn_browse, 1, 2)
+        grid.addWidget(self.chk_keep, 2, 0, 1, 3)
+        grid.addWidget(self.chk_delete, 3, 0, 1, 3)
+        layout.addWidget(cfg)
 
-        frm_btn = ttk.Frame(self)
-        frm_btn.grid(row=2, column=0, **pad)
-        self.btn_run = ttk.Button(frm_btn, text="▶ 변환 시작", command=self.run, width=14)
-        self.btn_run.grid(row=0, column=0, padx=6)
+        btn_row = QHBoxLayout()
+        self.btn_run = QPushButton("▶ 변환 시작")
+        btn_row.addWidget(self.btn_run)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
 
-        self.progress = self._make_progress(self, 3)
-        self.log_box = self._make_log(self, 4)
+        self.progress = self._progress_widget()
+        self.log = self._log_widget()
+        layout.addWidget(self.progress)
+        layout.addWidget(self.log)
+
+        self.btn_run.clicked.connect(self.run)
 
     def run(self):
         if not self.selected_paths:
-            messagebox.showwarning("알림", "먼저 폴더나 파일을 선택하세요.")
+            QMessageBox.warning(self, "알림", "먼저 폴더나 파일을 선택하세요.")
             return
-        out_val = self.var_out.get()
-        ffmpeg = get_ffmpeg()
-        self.btn_run.config(state="disabled")
-        self.progress["maximum"] = len(self.selected_paths)
-        self.progress["value"] = 0
-        self._clear_log(self.log_box)
 
-        def worker():
-            done, failed, skipped = 0, 0, 0
+        ffmpeg = get_ffmpeg()
+        bitrate = self.bitrate_combo.currentText()
+        signals = WorkerSignals()
+        signals.log.connect(lambda m, t: self._append_log(self.log, m, t))
+        signals.progress.connect(self.progress.setValue)
+        self.progress.setMaximum(len(self.selected_paths))
+        self.log.clear()
+
+        def work():
+            done = failed = skipped = 0
             for i, src in enumerate(self.selected_paths):
-                out_dir = self._resolve_output_dir(src, self.var_out)
+                if Path(src).suffix.lower() == ".m4a":
+                    signals.log.emit(f"[건너뜀] {Path(src).name}  (이미 m4a)", "ok")
+                    skipped += 1
+                    signals.progress.emit(i + 1)
+                    continue
+                out_dir = self._resolve_out(src)
                 out_dir.mkdir(parents=True, exist_ok=True)
                 out_path = out_dir / (Path(src).stem + ".m4a")
-
-                if Path(src).suffix.lower() == ".m4a":
-                    self._log(self.log_box, f"[건너뜀] {Path(src).name}  (이미 m4a)\n", "ok")
-                    skipped += 1
-                    self.progress["value"] = i + 1
-                    self.update_idletasks()
-                    continue
-
-                self._log(self.log_box, f"\n[{i+1}/{len(self.selected_paths)}] {Path(src).name}\n")
+                signals.log.emit(f"\n[{i+1}/{len(self.selected_paths)}] {Path(src).name}", "")
                 try:
                     result = subprocess.run(
-                        [ffmpeg, "-y", "-i", src, "-c:a", "aac",
-                         "-b:a", self.var_bitrate.get(), str(out_path)],
+                        [ffmpeg, "-y", "-i", src, "-c:a", "aac", "-b:a", bitrate, str(out_path)],
                         capture_output=True, text=True
                     )
                     if result.returncode == 0:
-                        out_mb = get_mb(out_path)
-                        self._log(self.log_box, f"    → {out_path.name}  ({out_mb:.1f} MB)\n")
+                        signals.log.emit(f"    → {out_path.name}  ({get_mb(out_path):.1f} MB)", "")
                         done += 1
-                        if self.var_delete.get():
+                        if self.chk_delete.isChecked():
                             Path(src).unlink()
-                            self._log(self.log_box, "    원본 삭제됨\n", "warn")
+                            signals.log.emit("    원본 삭제됨", "warn")
                     else:
-                        self._log(self.log_box, f"    ❌ 오류: {result.stderr[-200:]}\n", "err")
+                        signals.log.emit(f"    ❌ 오류: {result.stderr[-200:]}", "err")
                         failed += 1
                 except FileNotFoundError:
-                    self._log(self.log_box, "    ❌ ffmpeg을 찾을 수 없습니다.\n", "err")
+                    signals.log.emit("    ❌ ffmpeg을 찾을 수 없습니다.", "err")
                     failed += 1
-                self.progress["value"] = i + 1
-                self.update_idletasks()
-            self._log(self.log_box, f"\n── 완료: {done}개 변환, {skipped}개 건너뜀, {failed}개 실패 ──\n")
-            self.btn_run.config(state="normal")
+                signals.progress.emit(i + 1)
+            signals.log.emit(f"\n── 완료: {done}개 변환, {skipped}개 건너뜀, {failed}개 실패 ──", "")
+            signals.finished.emit()
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._launch(signals, work, self.btn_run)
 
 
 # ── 탭 4: 오디오 용량 분할 ────────────────────────────────────
 
 class AudioSplitTab(BaseTab):
-    def _build(self):
-        pad = dict(padx=12, pady=6)
-        self.var_label = tk.StringVar(value="선택된 항목 없음")
-        self._make_file_buttons(self, 0, AUDIO_TYPES, self.var_label)
+    def _build(self, layout):
+        layout.addWidget(self._input_group(AUDIO_FILTER))
 
-        frm_cfg = ttk.LabelFrame(self, text="설정")
-        frm_cfg.grid(row=1, column=0, sticky="ew", **pad)
-        ttk.Label(frm_cfg, text="최대 크기 (MB):").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        self.var_mb = tk.StringVar(value="100")
-        ttk.Entry(frm_cfg, textvariable=self.var_mb, width=8).grid(row=0, column=1, sticky="w", pady=4)
-        self.var_out = tk.StringVar(value="(원본과 동일)")
-        self._make_output_row(self, frm_cfg, 1, self.var_out)
-        self.var_delete = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frm_cfg, text="분할 후 원본 삭제", variable=self.var_delete).grid(
-            row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
+        cfg = QGroupBox("설정")
+        grid = QGridLayout(cfg)
+        self.mb_edit  = QLineEdit("100")
+        self.mb_edit.setFixedWidth(70)
+        self.out_edit = QLineEdit("(원본과 동일)")
+        btn_browse = QPushButton("찾아보기")
+        btn_browse.clicked.connect(self._browse_output)
+        self.chk_keep   = QCheckBox("하위 폴더 구조 유지")
+        self.chk_delete = QCheckBox("분할 후 원본 삭제")
+        grid.addWidget(QLabel("최대 크기 (MB):"), 0, 0)
+        grid.addWidget(self.mb_edit, 0, 1, Qt.AlignmentFlag.AlignLeft)
+        grid.addWidget(QLabel("출력 폴더:"), 1, 0)
+        grid.addWidget(self.out_edit, 1, 1)
+        grid.addWidget(btn_browse, 1, 2)
+        grid.addWidget(self.chk_keep, 2, 0, 1, 3)
+        grid.addWidget(self.chk_delete, 3, 0, 1, 3)
+        layout.addWidget(cfg)
 
-        frm_btn = ttk.Frame(self)
-        frm_btn.grid(row=2, column=0, **pad)
-        self.btn_run = ttk.Button(frm_btn, text="▶ 분할 시작", command=self.run, width=14)
-        self.btn_run.grid(row=0, column=0, padx=6)
+        btn_row = QHBoxLayout()
+        self.btn_run = QPushButton("▶ 분할 시작")
+        btn_row.addWidget(self.btn_run)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
 
-        self.progress = self._make_progress(self, 3)
-        self.log_box = self._make_log(self, 4)
+        self.progress = self._progress_widget()
+        self.log = self._log_widget()
+        layout.addWidget(self.progress)
+        layout.addWidget(self.log)
+
+        self.btn_run.clicked.connect(self.run)
 
     def run(self):
         if not self.selected_paths:
-            messagebox.showwarning("알림", "먼저 폴더나 파일을 선택하세요.")
+            QMessageBox.warning(self, "알림", "먼저 폴더나 파일을 선택하세요.")
             return
         try:
-            max_mb = float(self.var_mb.get())
+            max_mb = float(self.mb_edit.text())
         except ValueError:
-            messagebox.showerror("오류", "크기는 숫자로 입력하세요.")
+            QMessageBox.critical(self, "오류", "크기는 숫자로 입력하세요.")
             return
 
-        out_val = self.var_out.get()
         ffmpeg = get_ffmpeg()
         targets = [p for p in self.selected_paths if get_mb(p) > max_mb]
-
         if not targets:
-            messagebox.showinfo("알림", "분할이 필요한 파일이 없습니다.")
+            QMessageBox.information(self, "알림", "분할이 필요한 파일이 없습니다.")
             return
 
-        self.btn_run.config(state="disabled")
-        self.progress["maximum"] = len(targets)
-        self.progress["value"] = 0
-        self._clear_log(self.log_box)
+        signals = WorkerSignals()
+        signals.log.connect(lambda m, t: self._append_log(self.log, m, t))
+        signals.progress.connect(self.progress.setValue)
+        self.progress.setMaximum(len(targets))
+        self.log.clear()
 
         def get_duration(src):
-            result = subprocess.run(
-                [ffmpeg, "-i", src],
-                capture_output=True, text=True
-            )
+            result = subprocess.run([ffmpeg, "-i", src], capture_output=True, text=True)
             for line in result.stderr.split("\n"):
                 if "Duration" in line:
                     t = line.split("Duration:")[1].split(",")[0].strip()
@@ -588,57 +679,68 @@ class AudioSplitTab(BaseTab):
                     return float(h) * 3600 + float(m) * 60 + float(s)
             return None
 
-        def worker():
-            done, failed = 0, 0
+        def work():
+            done = failed = 0
             for i, src in enumerate(targets):
-                out_dir = self._resolve_output_dir(src, self.var_out)
+                out_dir = self._resolve_out(src)
                 out_dir.mkdir(parents=True, exist_ok=True)
-                src_mb = get_mb(src)
-                self._log(self.log_box, f"\n[{i+1}/{len(targets)}] {Path(src).name}  ({src_mb:.1f} MB)\n")
+                signals.log.emit(f"\n[{i+1}/{len(targets)}] {Path(src).name}  ({get_mb(src):.1f} MB)", "")
                 try:
                     duration = get_duration(src)
                     if not duration:
                         raise ValueError("재생 시간을 읽을 수 없습니다.")
-
-                    # 청크당 시간 추정
-                    seconds_per_chunk = int(duration * (max_mb / src_mb) * 0.9)
+                    secs = int(duration * (max_mb / get_mb(src)) * 0.9)
                     ext = Path(src).suffix.lower()
-                    part_num = 1
-                    start = 0
-
+                    part_num, start = 1, 0
                     while start < duration:
-                        end = min(start + seconds_per_chunk, duration)
+                        end = min(start + secs, duration)
                         out_name = f"{Path(src).stem}_part{part_num}{ext}"
                         out_path = str(out_dir / out_name)
                         subprocess.run(
-                            [ffmpeg, "-y", "-i", src,
-                             "-ss", str(start), "-to", str(end),
-                             "-c", "copy", out_path],
+                            [ffmpeg, "-y", "-i", src, "-ss", str(start),
+                             "-to", str(end), "-c", "copy", out_path],
                             capture_output=True
                         )
-                        chunk_mb = get_mb(out_path)
-                        self._log(self.log_box, f"    → {out_name}  ({chunk_mb:.1f} MB)\n")
+                        signals.log.emit(f"    → {out_name}  ({get_mb(out_path):.1f} MB)", "")
                         start = end
                         part_num += 1
-
                     done += 1
-                    if self.var_delete.get():
+                    if self.chk_delete.isChecked():
                         Path(src).unlink()
-                        self._log(self.log_box, "    원본 삭제됨\n", "warn")
+                        signals.log.emit("    원본 삭제됨", "warn")
                 except FileNotFoundError:
-                    self._log(self.log_box, "    ❌ ffmpeg을 찾을 수 없습니다.\n", "err")
+                    signals.log.emit("    ❌ ffmpeg을 찾을 수 없습니다.", "err")
                     failed += 1
                 except Exception as e:
-                    self._log(self.log_box, f"    ❌ 오류: {e}\n", "err")
+                    signals.log.emit(f"    ❌ 오류: {e}", "err")
                     failed += 1
-                self.progress["value"] = i + 1
-                self.update_idletasks()
-            self._log(self.log_box, f"\n── 완료: {done}개 분할, {failed}개 실패 ──\n")
-            self.btn_run.config(state="normal")
+                signals.progress.emit(i + 1)
+            signals.log.emit(f"\n── 완료: {done}개 분할, {failed}개 실패 ──", "")
+            signals.finished.emit()
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._launch(signals, work, self.btn_run)
+
+
+# ── 메인 윈도우 ────────────────────────────────────────────────
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("PDF & 오디오 도구")
+        self.setMinimumWidth(560)
+
+        tabs = QTabWidget()
+        tabs.addTab(PdfSizeTab(),     "  PDF 용량 분할  ")
+        tabs.addTab(PdfPageTab(),     "  PDF 페이지 분할  ")
+        tabs.addTab(AudioConvertTab(),"  오디오 → m4a  ")
+        tabs.addTab(AudioSplitTab(),  "  오디오 용량 분할  ")
+        tabs.setContentsMargins(8, 8, 8, 8)
+
+        self.setCentralWidget(tabs)
 
 
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
