@@ -2,6 +2,11 @@ name: Build PDF Splitter
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "릴리스 버전 (예: v1.0.1)"
+        required: true
+        default: "v1.0.0"
 
 jobs:
   build:
@@ -41,16 +46,42 @@ jobs:
           choco install ffmpeg -y
           copy "C:\ProgramData\chocolatey\bin\ffmpeg.exe" ffmpeg.exe
 
-      - name: 빌드
-        run: pyinstaller ${{ matrix.pyinstaller_args }} -y --add-binary "ffmpeg:." pdf_splitter.py
+      - name: 빌드 (macOS)
         if: matrix.os == 'macos-latest'
+        run: pyinstaller ${{ matrix.pyinstaller_args }} -y --add-binary "ffmpeg:." pdf_splitter.py
 
       - name: 빌드 (Windows)
-        run: pyinstaller ${{ matrix.pyinstaller_args }} -y --add-binary "ffmpeg.exe;." pdf_splitter.py
         if: matrix.os == 'windows-latest'
+        run: pyinstaller ${{ matrix.pyinstaller_args }} -y --add-binary "ffmpeg.exe;." pdf_splitter.py
+
+      - name: 압축 (macOS)
+        if: matrix.os == 'macos-latest'
+        run: cd dist && zip -r pdf_splitter_mac.zip pdf_splitter/
+
+      - name: 압축 (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cd dist && Compress-Archive -Path pdf_splitter.exe -DestinationPath pdf_splitter_windows.zip
+        shell: pwsh
 
       - name: 결과물 업로드
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/
+          path: dist/*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 아티팩트 다운로드
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: GitHub Release 생성 및 파일 업로드
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: ${{ github.event.inputs.version }}
+          files: artifacts/**/*.zip

@@ -4,12 +4,17 @@ PDF & 오디오 도구 (PyQt6)
 의존성: pip install pymupdf pyqt6
 """
 
+VERSION = "v1.0.0"
+GITHUB_REPO = "jiyeonvis/pdf_splitter"
+
 import os
 import sys
 import shutil
 import tempfile
 import threading
 import subprocess
+import urllib.request
+import json
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -724,10 +729,14 @@ class AudioSplitTab(BaseTab):
 # ── 메인 윈도우 ────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
+    _update_signal = pyqtSignal()
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PDF & 오디오 도구")
+        self.setWindowTitle(f"PDF & 오디오 도구  {VERSION}")
         self.setMinimumWidth(560)
+        self._update_info = None
+        self._update_signal.connect(self._show_update_dialog)
 
         tabs = QTabWidget()
         tabs.addTab(PdfSizeTab(),     "  PDF 용량 분할  ")
@@ -737,6 +746,34 @@ class MainWindow(QMainWindow):
         tabs.setContentsMargins(8, 8, 8, 8)
 
         self.setCentralWidget(tabs)
+
+        # 백그라운드에서 업데이트 확인
+        threading.Thread(target=self._check_update, daemon=True).start()
+
+    def _check_update(self):
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            req = urllib.request.Request(url, headers={"User-Agent": "pdf-splitter"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+            latest = data.get("tag_name", "")
+            if latest and latest != VERSION:
+                release_url = data.get("html_url", f"https://github.com/{GITHUB_REPO}/releases/latest")
+                self._update_info = (latest, release_url)
+                # 메인 스레드에서 다이얼로그 표시
+                self._update_signal.emit()
+        except Exception:
+            pass  # 네트워크 오류 등은 조용히 무시
+
+    def _show_update_dialog(self):
+        latest, url = self._update_info
+        msg = QMessageBox(self)
+        msg.setWindowTitle("업데이트 알림")
+        msg.setText(f"새 버전이 있습니다: <b>{latest}</b><br><br>"
+                    f"현재 버전: {VERSION}<br><br>"
+                    f"<a href='{url}'>다운로드 페이지 열기</a>")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.exec()
 
 
 if __name__ == "__main__":
