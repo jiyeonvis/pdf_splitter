@@ -43,8 +43,9 @@ jobs:
             - name: ffmpeg 설치 (Windows)
               if: matrix.os == 'windows-latest'
               run: |
-                  choco install ffmpeg -y
-                  copy "C:\ProgramData\chocolatey\bin\ffmpeg.exe" ffmpeg.exe
+                  curl -L "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -o ffmpeg.zip
+                  7z e ffmpeg.zip "*/bin/ffmpeg.exe" -o. -r
+              shell: pwsh
 
             - name: 빌드 (macOS)
               if: matrix.os == 'macos-latest'
